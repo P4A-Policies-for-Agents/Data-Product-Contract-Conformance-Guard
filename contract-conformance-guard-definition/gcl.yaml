@@ -1,0 +1,106 @@
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: Extension
+metadata:
+  labels:
+    title: Data Product Contract Conformance Guard
+    category: Quality of Service
+    description: >-
+      Checks each data-product response against its CDGC-governed field contract
+      and acts per drift type — log, inform, strip, or reject — for unexpected
+      fields, missing required fields, type mismatches, and sensitive-field leaks.
+    metadata/capabilities/injectionPoint: inbound
+    metadata/capabilities/assetTypes: mcp,a2a,a2a_v1
+    metadata/interfaceScope: api,resource
+spec:
+  extends:
+    - name: extension-definition
+      namespace: default
+  properties:
+    cdgcLoginUrl:
+      type: string
+      format: service
+      description: IDMC login base URL, e.g. https://dm-us.informaticacloud.com.
+    cdgcBaseApiUrl:
+      type: string
+      format: service
+      description: CDGC base API URL, e.g. https://idmc-api.dm-us.informaticacloud.com.
+    cdgcOrgUsername:
+      type: string
+      description: IDMC read-only service-account username.
+      "@context": { "@characteristics": [security:sensitive] }
+    cdgcOrgPassword:
+      type: string
+      description: IDMC service-account password.
+      "@context": { "@characteristics": [security:sensitive] }
+    cdgcAssetId:
+      type: string
+      description: >-
+        CDGC asset id whose governed field contract is enforced (default when
+        assetIdHeader is absent).
+    assetIdHeader:
+      type: string
+      default: x-dp-contract-id
+      description: Request header overriding cdgcAssetId per request (multi-product).
+    contractMarker:
+      type: string
+      default: "contract-fields="
+      description: >-
+        Marker preceding the JSON field-contract array in the CDGC asset's
+        description (summary/core.description). The contract is an array of
+        {name,type,required,sensitive,term}. (Governed Business Terms supply the
+        vocabulary; this block is their per-field projection onto the asset.)
+    recordsPath:
+      type: string
+      default: ""
+      description: >-
+        "/"-separated path into the tool-result payload to the record(s) whose
+        fields are checked, e.g. "orders". Empty = the payload root. If the node
+        is an array, every element is checked; if an object, its keys are checked.
+    onUnexpectedField:
+      type: string
+      enum: [off, log, inform, strip, reject]
+      default: strip
+      description: A response field not present in the governed contract.
+    onMissingRequired:
+      type: string
+      enum: [off, log, inform, strip, reject]
+      default: reject
+      description: A required contract field absent from the response record.
+    onTypeMismatch:
+      type: string
+      enum: [off, log, inform, strip, reject]
+      default: inform
+      description: A response field whose JSON type differs from the contract type.
+    onSensitiveField:
+      type: string
+      enum: [off, log, inform, strip, reject]
+      default: strip
+      description: A contract field flagged sensitive appearing in the response (leak guard).
+    refreshIntervalSeconds:
+      type: integer
+      default: 86400
+      minimum: 30
+      description: Cache TTL for the fetched contract before a lazy CDGC refresh.
+    failOpenOnCdgcError:
+      type: boolean
+      default: true
+      description: >-
+        On a transient CDGC error with a cached contract, keep enforcing it. With
+        no contract available at all, the guard passes the response through
+        (fail-open) and marks x-dp-contract-status=error — it never blocks on its
+        own outage.
+    distributed:
+      type: boolean
+      default: false
+      description: Share cached contract + refresh lock across replicas (needs shared storage).
+    timeout:
+      type: integer
+      default: 5000
+      description: Per-call CDGC timeout (ms), clamped to a ~10s chained budget.
+  required:
+    - cdgcLoginUrl
+    - cdgcBaseApiUrl
+    - cdgcOrgUsername
+    - cdgcOrgPassword
+    - cdgcAssetId

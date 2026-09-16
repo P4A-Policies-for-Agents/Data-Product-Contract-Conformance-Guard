@@ -1,0 +1,15 @@
+{
+  "protocolVersion": "2025-03-26",
+  "transport": { "kind": "streamableHttp", "path": "/mcp" },
+  "capabilities": { "tools": { "listChanged": true } },
+  "tools": [
+    {
+      "name": "get_orders",
+      "description": "Return sales order records. This upstream has drifted from its governed contract; the Data Product Contract Conformance Guard checks each response against the CDGC contract and strips/rejects drift. Pass variant=leak or variant=broken.",
+      "inputSchema": { "type": "object", "properties": {
+        "variant": { "type": "string", "description": "leak | broken" } } },
+      "outputSchema": { "type": "object", "properties": {
+        "orders": { "type": "array" }, "count": { "type": "integer" } } }
+    }
+  ]
+}

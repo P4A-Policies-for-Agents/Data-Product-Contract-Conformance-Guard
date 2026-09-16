@@ -1,0 +1,17 @@
+{
+  "cdgcLoginUrl": "https://dm-us.informaticacloud.com",
+  "cdgcBaseApiUrl": "https://idmc-api.dm-us.informaticacloud.com",
+  "cdgcOrgUsername": "REPLACE_ME_SERVICE_ACCOUNT",
+  "cdgcOrgPassword": "REPLACE_ME_SECRET",
+  "cdgcAssetId": "REPLACE_ME_CDGC_ASSET_ID",
+  "contractMarker": "contract-fields=",
+  "recordsPath": "orders",
+  "onUnexpectedField": "strip",
+  "onMissingRequired": "reject",
+  "onTypeMismatch": "inform",
+  "onSensitiveField": "strip",
+  "refreshIntervalSeconds": 86400,
+  "failOpenOnCdgcError": true,
+  "distributed": false,
+  "timeout": 5000
+}
