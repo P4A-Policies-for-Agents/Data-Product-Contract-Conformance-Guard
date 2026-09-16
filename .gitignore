@@ -32,3 +32,6 @@ Thumbs.db
 .vscode/
 *.swp
 demo/config.json
+demo/combined/config-metadata-injection.json
+demo/combined/config-conformance-guard.json
+demo/combined/env.local.sh

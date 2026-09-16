@@ -63,11 +63,25 @@ Actions (`off | log | inform | strip | reject`), applied with precedence
 
 The outcome rides in a **`_contract` annotation in the response payload** (the
 guard rewrites the body, so a transport header derived from body content isn't
-possible on the split response flow):
+possible on the split response flow). It **self-describes and enforces from a
+single CDGC fetch** — the same asset-detail call yields the identity (name,
+externalId) and the field contract:
 
 ```json
-"_contract": { "status": "repaired|drift|ok", "drift": "!customerEmail,+internalMargin", "assetId": "...", "source": "cdgc" }
+"_contract": {
+  "status": "repaired|drift|ok",
+  "name": "Sales Orders", "externalId": "DS-14", "assetId": "...",
+  "drift": "!customerEmail,+internalMargin", "source": "cdgc"
+}
 ```
+
+> **Trusted data foundation, one policy.** This folds the *identity* half of the
+> Contract Metadata Injection story into the guard: because the guard already
+> buffers the body and fetches the governed asset, it emits the contract identity
+> **and** enforces the field contract in one robust pass — no second policy, no
+> second CDGC call. (Composing a separate header-stamping metadata policy on the
+> same instance is unreliable: its response-leg fetch races the streamed
+> response-head commit. See `demo/combined/README.md`.)
 
 Drift markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sensitive.
 

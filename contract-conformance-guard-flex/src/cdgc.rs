@@ -8,10 +8,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::conformance::ContractField;
 
-/// Cached, parsed field contract for one asset.
+/// Cached, parsed field contract for one asset, plus its governed identity
+/// (so the guard can self-describe the response — one CDGC fetch does both).
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct CachedContract {
     pub fields: Vec<ContractField>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub external_id: Option<String>,
     /// Unix seconds when fetched — drives the refresh TTL.
     pub timestamp: i64,
 }

@@ -113,7 +113,7 @@ async fn fetch_contract(
     config: &Config,
     clock: &Clock,
     asset_id: &str,
-) -> Result<Vec<ContractField>> {
+) -> Result<(Vec<ContractField>, Option<String>, Option<String>)> {
     let start = clock.now();
     let per_call = config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
     let marker = config.contract_marker.as_deref().unwrap_or(DEFAULT_MARKER);
@@ -152,8 +152,11 @@ async fn fetch_contract(
         return Err(anyhow!("CDGC detail status {}", detail_resp.status_code()));
     }
     let detail: Value = serde_json::from_slice(detail_resp.body()).map_err(|e| anyhow!("parse detail: {e}"))?;
-    let description = detail.get("summary").and_then(|s| s.get("core.description")).and_then(Value::as_str).unwrap_or("");
-    Ok(parse_contract(description, marker))
+    let summary = detail.get("summary");
+    let description = summary.and_then(|s| s.get("core.description")).and_then(Value::as_str).unwrap_or("");
+    let name = summary.and_then(|s| s.get("core.name")).and_then(Value::as_str).map(str::to_string);
+    let external_id = detail.get("core.externalId").and_then(Value::as_str).map(str::to_string);
+    Ok((parse_contract(description, marker), name, external_id))
 }
 
 async fn read_cached<S: DataStorage>(store: &S, key: &str) -> Option<CachedContract> {
@@ -210,28 +213,29 @@ async fn try_acquire_refresh_lock<S: DataStorage>(store: &S, key: &str, now: i64
 
 async fn get_contract<S: DataStorage>(
     client: &HttpClient, config: &Config, clock: &Clock, contract_store: &S, lock_store: &S, asset_id: &str,
-) -> Option<Vec<ContractField>> {
+) -> Option<CachedContract> {
     let key = format!("{CONTRACT_CACHE_KEY_PREFIX}{asset_id}");
     let ttl = config.refresh_interval_seconds.unwrap_or(DEFAULT_REFRESH_INTERVAL_SECONDS).max(0);
     let now = now_secs(clock);
     let cached = read_cached(contract_store, &key).await;
     if let Some(c) = &cached {
         if now - c.timestamp < ttl {
-            return Some(c.fields.clone());
+            return cached;
         }
     }
     let lock_key = format!("{REFRESH_LOCK_KEY_PREFIX}{asset_id}");
     if !try_acquire_refresh_lock(lock_store, &lock_key, now).await.unwrap_or(true) {
-        return cached.map(|c| c.fields);
+        return cached;
     }
     match fetch_contract(client, config, clock, asset_id).await {
-        Ok(fields) => {
-            write_cached(contract_store, &key, &CachedContract { fields: fields.clone(), timestamp: now }).await;
-            Some(fields)
+        Ok((fields, name, external_id)) => {
+            let entry = CachedContract { fields, name, external_id, timestamp: now };
+            write_cached(contract_store, &key, &entry).await;
+            Some(entry)
         }
         Err(e) => {
             logger::warn!("ccg: contract refresh failed for '{asset_id}': {e}");
-            if config.fail_open_on_cdgc_error.unwrap_or(true) { cached.map(|c| c.fields) } else { None }
+            if config.fail_open_on_cdgc_error.unwrap_or(true) { cached } else { None }
         }
     }
 }
@@ -325,10 +329,11 @@ async fn response_filter<S: DataStorage>(
         _ => return,
     };
 
-    let contract = match get_contract(&client, &config, &clock, &*contract_store, &*lock_store, &ctx.asset_id).await {
-        Some(c) if !c.is_empty() => c,
+    let cc = match get_contract(&client, &config, &clock, &*contract_store, &*lock_store, &ctx.asset_id).await {
+        Some(c) if !c.fields.is_empty() => c,
         _ => return, // no governed contract → pass through (fail-open)
     };
+    let contract = cc.fields.clone();
     let actions = actions_of(&config);
     let records_path = config.records_path.as_deref().unwrap_or("");
 
@@ -426,8 +431,10 @@ async fn response_filter<S: DataStorage>(
     }
     let status = if !dec.strip.is_empty() { "repaired" } else if dec.inform { "drift" } else { "ok" };
     if let Value::Object(root) = &mut payload {
+        // Self-describe (identity from the same CDGC fetch) AND report enforcement.
         root.insert("_contract".to_string(), json!({
             "status": status, "assetId": ctx.asset_id,
+            "name": cc.name, "externalId": cc.external_id,
             "drift": dec.summary, "source": "cdgc",
         }));
     }
