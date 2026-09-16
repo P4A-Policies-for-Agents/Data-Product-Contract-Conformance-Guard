@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Agent simulation for the Data Product Contract Conformance Guard demo.
+Agent simulation for the catalog-driven Contract Conformance Guard demo.
 
-The Sales Orders upstream has DRIFTED from its CDGC-governed contract. An agent
-calls get_orders twice:
-  * variant=leak   — records carry an ungoverned `internalMargin` and a sensitive
-                     `customerEmail` (all required fields present).
-  * variant=broken — a record missing required `currency`, with `total` a string.
+The guard is configured with only a CDGC catalog-source id + flat-file id. At
+runtime it derives the field contract live from Informatica CDGC (the scanned
+dim_product.csv columns + their linked Business Terms) and checks each response:
 
-Set CMP_GW_URL to the direct A2D mock to see the raw (drifted) data, or to the
-governed gateway endpoint to see the guard strip / reject per the contract.
+  * variant=leak   — a record with all governed columns PLUS an ungoverned
+                     `internal_margin`, and `unit_cost` (whose Business Term is
+                     marked Confidential) → both stripped, status=repaired.
+  * variant=broken — a record missing the required `sku` column → rejected.
 
 Usage:
-    CMP_GW_URL="https://<host>/conformance-demo/mcp" python3 agent.py
+    CMP_GW_URL="https://<host>/catalog-conformance-demo/mcp" python3 agent.py
 """
 import json, os, ssl, sys, urllib.request
 
@@ -23,11 +23,11 @@ _CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mo
 
 
 def call(variant):
-    body = {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-            "params": {"name": "get_orders", "arguments": {"variant": variant}}}
+    body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {"name": "get_products", "arguments": {"variant": variant}}}
     req = urllib.request.Request(GW, data=json.dumps(body).encode(), method="POST", headers={
         "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
-        "Accept-Encoding": "identity", "mcp-session-id": "conformance-demo"})
+        "Accept-Encoding": "identity", "mcp-session-id": "catalog-demo"})
     try:
         raw = urllib.request.urlopen(req, timeout=25, context=_CTX).read().decode()
     except urllib.error.HTTPError as e:
@@ -35,28 +35,39 @@ def call(variant):
     for line in raw.splitlines():
         if line.startswith("data:"):
             raw = line[len("data:"):].strip(); break
-    try:
-        rpc = json.loads(raw)
-    except Exception:
-        return {"raw": raw}
+    rpc = json.loads(raw)
     if "error" in rpc:
         return {"REJECTED": rpc["error"]}
-    res = rpc.get("result", {})
     try:
-        return json.loads(res["content"][0]["text"])
+        return json.loads(rpc["result"]["content"][0]["text"])
     except Exception:
-        return res.get("structuredContent", res)
+        return rpc.get("result", {})
+
+
+def show(variant):
+    p = call(variant)
+    print(f"── get_products(variant={variant}) ──")
+    if "_contract" in p:
+        c = p["_contract"]
+        print(f"  governed asset : {c.get('name')}  (assetId {c.get('assetId')})")
+        print(f"  outcome        : status={c.get('status')}  drift={c.get('drift') or '(none)'}")
+        print(f"  data           : {p.get('products')}")
+    elif "REJECTED" in p:
+        print(f"  REJECTED       : {p['REJECTED']}")
+    else:
+        print(f"  {p}")
+    print()
 
 
 def main():
-    print(f"🛡️  contract-conformance agent  →  {GW}\n")
-    print("── variant=leak (ungoverned internalMargin + sensitive customerEmail; all required present) ──")
-    print(json.dumps(call("leak"), indent=2))
-    print("\n── variant=broken (missing required currency; total is a string) ──")
-    print(json.dumps(call("broken"), indent=2))
-    print("\nAgainst the DIRECT mock you'll see the raw drifted rows. Through the GATEWAY:")
-    print("  leak   → internalMargin + customerEmail stripped, _contract.status=repaired")
-    print("  broken → whole result rejected (JSON-RPC contract-violation error)")
+    print(f"🛡️  catalog-driven conformance guard  →  {GW}\n")
+    print("Contract derived live from CDGC (dim_product.csv columns + linked Business Terms):\n")
+    show("leak")
+    show("broken")
+    print("The guard was given only a catalog id + flat-file id; the field set,")
+    print("required flags (isCDE) and sensitivity (term marked Confidential) all came")
+    print("from Informatica CDGC. internal_margin (ungoverned) + unit_cost (sensitive)")
+    print("stripped; a record missing required sku is rejected.")
 
 
 if __name__ == "__main__":

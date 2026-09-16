@@ -28,7 +28,7 @@ _CTX = ssl.create_default_context(); _CTX.check_hostname = False; _CTX.verify_mo
 
 def call(variant):
     body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
-            "params": {"name": "get_orders", "arguments": {"variant": variant}}}
+            "params": {"name": "get_products", "arguments": {"variant": variant}}}
     req = urllib.request.Request(GW, data=json.dumps(body).encode(), method="POST", headers={
         "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
         "Accept-Encoding": "identity", "mcp-session-id": "tdf-demo"})
@@ -50,12 +50,12 @@ def call(variant):
 
 def show(variant):
     payload = call(variant)
-    print(f"── get_orders(variant={variant}) ──")
+    print(f"── get_products(variant={variant}) ──")
     if "_contract" in payload:
         c = payload["_contract"]
         print(f"  self-describe : name={c.get('name')} externalId={c.get('externalId')} assetId={c.get('assetId')}")
         print(f"  enforce       : status={c.get('status')} drift={c.get('drift') or '(none)'}")
-        print(f"  data          : {payload.get('orders')}")
+        print(f"  data          : {payload.get('products')}")
     elif "REJECTED" in payload:
         print(f"  REJECTED      : {payload['REJECTED']}")
     else:

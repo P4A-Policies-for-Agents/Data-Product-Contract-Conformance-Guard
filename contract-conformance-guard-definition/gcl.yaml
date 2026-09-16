@@ -6,9 +6,9 @@ metadata:
     title: Data Product Contract Conformance Guard
     category: Quality of Service
     description: >-
-      Checks each data-product response against its CDGC-governed field contract
-      and acts per drift type — log, inform, strip, or reject — for unexpected
-      fields, missing required fields, type mismatches, and sensitive-field leaks.
+      Derives a data product's field contract from Informatica CDGC (a scanned
+      flat file's columns + linked Business Terms) and checks each response
+      against it — log, inform, strip, or reject per drift type.
     metadata/capabilities/injectionPoint: inbound
     metadata/capabilities/assetTypes: mcp,a2a,a2a_v1
     metadata/interfaceScope: api,resource
@@ -21,10 +21,12 @@ spec:
       type: string
       format: service
       description: IDMC login base URL, e.g. https://dm-us.informaticacloud.com.
-    cdgcBaseApiUrl:
+    cdgcSearchUrl:
       type: string
       format: service
-      description: CDGC base API URL, e.g. https://idmc-api.dm-us.informaticacloud.com.
+      description: >-
+        CDGC search API base (the cdgc-api host serving ccgf-searchv2), e.g.
+        https://cdgc-api.dm-us.informaticacloud.com.
     cdgcOrgUsername:
       type: string
       description: IDMC read-only service-account username.
@@ -33,63 +35,64 @@ spec:
       type: string
       description: IDMC service-account password.
       "@context": { "@characteristics": [security:sensitive] }
-    cdgcAssetId:
+    catalogId:
       type: string
       description: >-
-        CDGC asset id whose governed field contract is enforced (default when
-        assetIdHeader is absent).
-    assetIdHeader:
+        CDGC catalog-source (data source) id the flat file belongs to. Used to
+        scope/validate the asset (a column's core.origin must match).
+    flatFileId:
       type: string
-      default: x-dp-contract-id
-      description: Request header overriding cdgcAssetId per request (multi-product).
-    contractMarker:
-      type: string
-      default: "contract-fields="
       description: >-
-        Marker preceding the JSON field-contract array in the CDGC asset's
-        description (summary/core.description). The contract is an array of
-        {name,type,required,sensitive,term}. (Governed Business Terms supply the
-        vocabulary; this block is their per-field projection onto the asset.)
+        Internal id of the scanned flat-file / table asset whose governed columns
+        define the contract. The policy enumerates its columns and their linked
+        Business Terms from CDGC — no per-field configuration needed.
+    flatFileIdHeader:
+      type: string
+      default: x-dp-flatfile-id
+      description: Optional request header overriding flatFileId per request (multi-product).
     recordsPath:
       type: string
       default: ""
       description: >-
         "/"-separated path into the tool-result payload to the record(s) whose
-        fields are checked, e.g. "orders". Empty = the payload root. If the node
-        is an array, every element is checked; if an object, its keys are checked.
+        fields are checked, e.g. "products". Empty = payload root; array = each element.
+    sensitiveMarker:
+      type: string
+      default: confidential
+      description: >-
+        Case-insensitive substring in a field's Business Term description that marks
+        the field sensitive (e.g. a term whose definition says "Confidential: ...").
     onUnexpectedField:
       type: string
       enum: [off, log, inform, strip, reject]
       default: strip
-      description: A response field not present in the governed contract.
+      description: A response field not present in the governed column set.
     onMissingRequired:
       type: string
       enum: [off, log, inform, strip, reject]
       default: reject
-      description: A required contract field absent from the response record.
+      description: A required (isCDE) governed field absent from the response record.
     onTypeMismatch:
       type: string
       enum: [off, log, inform, strip, reject]
       default: inform
-      description: A response field whose JSON type differs from the contract type.
+      description: A response field whose JSON type differs from the governed column datatype.
     onSensitiveField:
       type: string
       enum: [off, log, inform, strip, reject]
       default: strip
-      description: A contract field flagged sensitive appearing in the response (leak guard).
+      description: A sensitive governed field appearing in the response (leak guard).
     refreshIntervalSeconds:
       type: integer
       default: 86400
       minimum: 30
-      description: Cache TTL for the fetched contract before a lazy CDGC refresh.
+      description: Cache TTL for the derived contract before a lazy CDGC refresh.
     failOpenOnCdgcError:
       type: boolean
       default: true
       description: >-
         On a transient CDGC error with a cached contract, keep enforcing it. With
-        no contract available at all, the guard passes the response through
-        (fail-open) and marks x-dp-contract-status=error — it never blocks on its
-        own outage.
+        no contract at all, pass the response through (never block on own outage).
     distributed:
       type: boolean
       default: false
@@ -97,10 +100,11 @@ spec:
     timeout:
       type: integer
       default: 5000
-      description: Per-call CDGC timeout (ms), clamped to a ~10s chained budget.
+      description: Per-call CDGC timeout (ms), clamped to a chained refresh budget (~15s).
   required:
     - cdgcLoginUrl
-    - cdgcBaseApiUrl
+    - cdgcSearchUrl
     - cdgcOrgUsername
     - cdgcOrgPassword
-    - cdgcAssetId
+    - catalogId
+    - flatFileId

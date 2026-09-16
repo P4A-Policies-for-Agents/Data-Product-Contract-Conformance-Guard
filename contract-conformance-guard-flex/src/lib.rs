@@ -34,10 +34,8 @@ use pdk::logger;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::cdgc::{nonce_from_time, percent_encode, CachedContract, RefreshLock};
-use crate::conformance::{
-    analyze_record, apply_strip, decide, parse_contract, Action, Actions, ContractField,
-};
+use crate::cdgc::{nonce_from_time, CachedContract, RefreshLock};
+use crate::conformance::{analyze_record, apply_strip, decide, Action, Actions, ContractField};
 use crate::generated::config::Config;
 
 const CONTRACT_CACHE_NAMESPACE: &str = "ccg-contract";
@@ -49,9 +47,14 @@ const REFRESH_LOCK_TTL_MS: u32 = (REFRESH_LOCK_TTL_SECONDS as u32) * 1000;
 const CONTRACT_STORE_MIN_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 const CAS_MAX_RETRIES: u32 = 3;
 const DEFAULT_TIMEOUT_MS: i64 = 5_000;
-const CDGC_REFRESH_BUDGET_MS: i64 = 10_000;
+// Six chained CDGC calls (login, jwt, file, columns, term-links, terms).
+const CDGC_REFRESH_BUDGET_MS: i64 = 15_000;
 const DEFAULT_REFRESH_INTERVAL_SECONDS: i64 = 86_400;
-const DEFAULT_MARKER: &str = "contract-fields=";
+const SEARCH_PATH: &str = "/ccgf-searchv2/api/v1/search";
+const CT_FLATFIELD: &str = "com.infa.odin.models.file.flat.FlatField";
+const REL_TECH_GLOSSARY: &str = "com.infa.ccgf.models.governance.IClassTechnicalGlossaryBase";
+const ATTR_ISCDE: &str = "com.infa.ccgf.models.governance.isCDE";
+const DEFAULT_SENSITIVE_MARKER: &str = "confidential";
 /// JSON-RPC error code for a contract-conformance reject (server-defined range).
 const RPC_CONTRACT_VIOLATION: i64 = -32052;
 
@@ -107,18 +110,10 @@ fn actions_of(config: &Config) -> Actions {
     }
 }
 
-/// Login → JWT → data360 asset detail (summary segment) → parse the contract block.
-async fn fetch_contract(
-    client: &HttpClient,
-    config: &Config,
-    clock: &Clock,
-    asset_id: &str,
-) -> Result<(Vec<ContractField>, Option<String>, Option<String>)> {
-    let start = clock.now();
+/// Authenticate to IDMC (Login → JWT). Returns (jwt, orgId).
+async fn cdgc_auth(client: &HttpClient, config: &Config, clock: &Clock, start: SystemTime) -> Result<(String, String)> {
     let per_call = config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
-    let marker = config.contract_marker.as_deref().unwrap_or(DEFAULT_MARKER);
-
-    let login_body = serde_json::to_vec(&serde_json::json!({
+    let login_body = serde_json::to_vec(&json!({
         "username": config.cdgc_org_username, "password": config.cdgc_org_password,
     }))?;
     let t = next_call_timeout(per_call, elapsed_ms(start, clock.now())).ok_or_else(|| anyhow!("budget before Login"))?;
@@ -129,8 +124,7 @@ async fn fetch_contract(
         return Err(anyhow!("CDGC login status {}", login_resp.status_code()));
     }
     let login: CdgcLoginResponse = serde_json::from_slice(login_resp.body()).map_err(|e| anyhow!("parse login: {e}"))?;
-
-    let nonce = percent_encode(&nonce_from_time(clock.now()));
+    let nonce = nonce_from_time(clock.now());
     let cookie = format!("USER_SESSION={}", login.session_id);
     let t = next_call_timeout(per_call, elapsed_ms(start, clock.now())).ok_or_else(|| anyhow!("budget before JWT"))?;
     let jwt_resp = client.request(&config.cdgc_login_url)
@@ -141,22 +135,139 @@ async fn fetch_contract(
         return Err(anyhow!("CDGC JWT status {}", jwt_resp.status_code()));
     }
     let jwt: CdgcJwtResponse = serde_json::from_slice(jwt_resp.body()).map_err(|e| anyhow!("parse jwt: {e}"))?;
+    Ok((jwt.jwt_token, login.org_id))
+}
 
-    let detail_path = format!("/data360/search/v1/assets/{}?scheme=internal&segments=core,summary", percent_encode(asset_id));
-    let authz = format!("Bearer {}", jwt.jwt_token);
-    let t = next_call_timeout(per_call, elapsed_ms(start, clock.now())).ok_or_else(|| anyhow!("budget before Detail"))?;
-    let detail_resp = client.request(&config.cdgc_base_api_url).path(&detail_path)
-        .headers(vec![("Authorization", authz.as_str()), ("X-INFA-ORG-ID", login.org_id.as_str()), ("Content-Type", "application/json")])
-        .timeout(t).get().await.map_err(|e| anyhow!("CDGC detail failed: {e}"))?;
-    if detail_resp.status_code() >= 300 {
-        return Err(anyhow!("CDGC detail status {}", detail_resp.status_code()));
+/// One ccgf-searchv2 Elasticsearch query. Returns the `hits.hits[]` array's `sourceAsMap`s.
+async fn cdgc_search(
+    client: &HttpClient, config: &Config, clock: &Clock, start: SystemTime,
+    jwt: &str, org: &str, body: &Value,
+) -> Result<Vec<Value>> {
+    let per_call = config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
+    let authz = format!("Bearer {jwt}");
+    let payload = serde_json::to_vec(body)?;
+    let t = next_call_timeout(per_call, elapsed_ms(start, clock.now())).ok_or_else(|| anyhow!("budget before search"))?;
+    let resp = client.request(&config.cdgc_search_url).path(SEARCH_PATH)
+        .headers(vec![
+            ("Authorization", authz.as_str()),
+            ("X-INFA-ORG-ID", org),
+            ("X-INFA-SEARCH-LANGUAGE", "elasticsearch"),
+            ("Content-Type", "application/json"),
+        ])
+        .body(&payload).timeout(t).post().await
+        .map_err(|e| anyhow!("CDGC search failed: {e}"))?;
+    if resp.status_code() >= 300 {
+        return Err(anyhow!("CDGC search status {}", resp.status_code()));
     }
-    let detail: Value = serde_json::from_slice(detail_resp.body()).map_err(|e| anyhow!("parse detail: {e}"))?;
-    let summary = detail.get("summary");
-    let description = summary.and_then(|s| s.get("core.description")).and_then(Value::as_str).unwrap_or("");
-    let name = summary.and_then(|s| s.get("core.name")).and_then(Value::as_str).map(str::to_string);
-    let external_id = detail.get("core.externalId").and_then(Value::as_str).map(str::to_string);
-    Ok((parse_contract(description, marker), name, external_id))
+    let v: Value = serde_json::from_slice(resp.body()).map_err(|e| anyhow!("parse search: {e}"))?;
+    Ok(v.get("hits").and_then(|h| h.get("hits")).and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|h| h.get("sourceAsMap").cloned()).collect())
+        .unwrap_or_default())
+}
+
+fn s(map: &Value, key: &str) -> Option<String> {
+    map.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Catalog-driven contract: Login → JWT, then via ccgf-searchv2 resolve the flat
+/// file, enumerate its columns, their linked Business Terms, and build the contract
+/// (name + datatype + required[isCDE] + sensitive[term desc marker] + term).
+async fn fetch_contract(
+    client: &HttpClient,
+    config: &Config,
+    clock: &Clock,
+    flat_file_id: &str,
+) -> Result<(Vec<ContractField>, Option<String>, Option<String>)> {
+    let start = clock.now();
+    let (jwt, org) = cdgc_auth(client, config, clock, start).await?;
+    let sens_marker = config.sensitive_marker.as_deref().unwrap_or(DEFAULT_SENSITIVE_MARKER).to_lowercase();
+
+    // 1. Resolve the flat file → location + identity.
+    let files = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
+        "from":0,"size":1,"query":{"bool":{"must":[
+            {"terms":{"elementType":["OBJECT"]}},
+            {"terms":{"core.identity":[flat_file_id]}}]}}
+    })).await?;
+    let file = files.into_iter().next().ok_or_else(|| anyhow!("flat file '{flat_file_id}' not found"))?;
+    let location = s(&file, "core.location").ok_or_else(|| anyhow!("flat file has no core.location"))?;
+    let file_name = s(&file, "core.name");
+    let external_id = s(&file, "core.externalId");
+    // Scope check: the column origin must match the configured catalog source.
+    if !config.catalog_id.trim().is_empty() {
+        if let Some(origin) = s(&file, "core.origin") {
+            if origin != config.catalog_id {
+                logger::warn!("ccg: flat file origin {origin} != catalogId {}", config.catalog_id);
+            }
+        }
+    }
+
+    // 2. Enumerate columns (children of the file location).
+    let cols = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
+        "from":0,"size":1000,"query":{"bool":{
+            "must":[{"terms":{"core.classType":[CT_FLATFIELD]}}],
+            "filter":[{"terms":{"core.location::path_hierarchy.parent":[location]}}]}}
+    })).await?;
+    if cols.is_empty() {
+        return Err(anyhow!("no columns found for flat file '{flat_file_id}'"));
+    }
+    let col_ids: Vec<String> = cols.iter().filter_map(|c| s(c, "core.identity")).collect();
+
+    // 3. Column → Business Term links.
+    let rels = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
+        "from":0,"size":5000,"query":{"bool":{"must":[
+            {"terms":{"elementType":["RELATIONSHIP"]}},
+            {"terms":{"type":[REL_TECH_GLOSSARY]}},
+            {"terms":{"core.sourceIdentity":col_ids}}]}}
+    })).await?;
+    let mut col_to_term: Map<String, Value> = Map::new();
+    let mut term_ids: Vec<String> = Vec::new();
+    for r in &rels {
+        if let (Some(src), Some(tgt)) = (s(r, "core.sourceIdentity"), s(r, "core.targetIdentity")) {
+            col_to_term.entry(src).or_insert(Value::String(tgt.clone()));
+            if !term_ids.contains(&tgt) {
+                term_ids.push(tgt);
+            }
+        }
+    }
+
+    // 4. Resolve the linked terms → name / description / isCDE.
+    let mut terms: Map<String, Value> = Map::new(); // termId → {name, desc, isCDE}
+    if !term_ids.is_empty() {
+        let tdocs = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
+            "from":0,"size":5000,"query":{"bool":{"must":[
+                {"terms":{"elementType":["OBJECT"]}},
+                {"terms":{"core.identity":term_ids}}]}}
+        })).await?;
+        for t in &tdocs {
+            if let Some(id) = s(t, "core.identity") {
+                terms.insert(id, json!({
+                    "name": s(t, "core.name"),
+                    "desc": s(t, "core.description").unwrap_or_default(),
+                    "isCDE": t.get(ATTR_ISCDE).and_then(Value::as_bool).unwrap_or(false),
+                }));
+            }
+        }
+    }
+
+    // 5. Build the contract, one field per column.
+    let mut fields = Vec::new();
+    for c in &cols {
+        let (Some(id), Some(name)) = (s(c, "core.identity"), s(c, "core.name")) else { continue };
+        let ftype = s(c, "core.dataType").or_else(|| s(c, "core.inferredDataType"));
+        let mut required = false;
+        let mut sensitive = false;
+        let mut term_name: Option<String> = None;
+        if let Some(Value::String(tid)) = col_to_term.get(&id) {
+            if let Some(term) = terms.get(tid) {
+                term_name = term.get("name").and_then(Value::as_str).map(str::to_string);
+                required = term.get("isCDE").and_then(Value::as_bool).unwrap_or(false);
+                let desc = term.get("desc").and_then(Value::as_str).unwrap_or("");
+                sensitive = desc.to_lowercase().contains(&sens_marker);
+            }
+        }
+        fields.push(ContractField { name, ftype, required, sensitive, term: term_name });
+    }
+    Ok((fields, file_name, external_id))
 }
 
 async fn read_cached<S: DataStorage>(store: &S, key: &str) -> Option<CachedContract> {
@@ -293,9 +404,9 @@ fn records_snapshot(payload: &Value, path: &str) -> Vec<Map<String, Value>> {
 
 async fn request_filter(request_state: RequestState, config: Rc<Config>) -> Flow<Option<Ctx>> {
     let hs = request_state.into_headers_state().await;
-    let header_name = config.asset_id_header.as_deref().unwrap_or("x-dp-contract-id");
+    let header_name = config.flat_file_id_header.as_deref().unwrap_or("x-dp-flatfile-id");
     let asset_id = hs.handler().header(header_name).filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| config.cdgc_asset_id.clone());
+        .unwrap_or_else(|| config.flat_file_id.clone());
     let ct = hs.handler().header("content-type").unwrap_or_default();
     if ct.starts_with("application/json") && hs.method().as_str() == "POST" {
         let bs = hs.into_body_state().await;

@@ -1,115 +1,84 @@
 # Data Product Contract Conformance Guard — MuleSoft Omni/Flex Gateway Policy
 
 An **inbound, body-inspecting** custom policy for the MuleSoft Omni/Flex Gateway
-that checks each data-product response against its **CDGC-governed field contract**
-in Informatica IDMC and acts **per drift type** — `off | log | inform | strip |
-reject`. It protects an agent from **contract-breaking responses**: ungoverned
-fields, missing required fields, type mismatches, and **sensitive-field leaks**.
+that **derives a data product's field contract live from Informatica CDGC** and
+checks each response against it, acting **per drift type** — `off | log | inform
+| strip | reject`. It protects an agent from **contract-breaking responses**:
+ungoverned fields, missing required fields, type mismatches, and **sensitive-field
+leaks**.
+
+You configure it with **just two ids** — a **CDGC catalog-source id** and a
+**scanned flat-file (table) id**. Everything else (the field set, datatypes,
+required flags, sensitivity, business-term vocabulary) is **derived from CDGC at
+runtime** and cached. No per-field configuration.
 
 Built with the PDK, Rust → `wasm32-wasip1`, split-model. Works on **MCP**
 (`tools/call`), **A2A**, and **REST/HTTP** JSON responses.
 
-This is the enforcing sibling of the **Contract Metadata Injection** policy: that
-one *describes* the data product (stamps contract identity as headers); this one
-*enforces* that the data product's responses actually conform to the governed
-contract.
-
 ---
 
-## The governed contract (Business Terms + field schema)
+## How the contract is derived (catalog-driven)
 
-The contract is a JSON array carried on the CDGC asset, one entry per field:
+On a cache miss the policy authenticates to IDMC (**Login → JWT**) and then, via
+the CDGC search API **`POST cdgc-api…/ccgf-searchv2/api/v1/search`** (Elasticsearch
+DSL, `X-INFA-SEARCH-LANGUAGE: elasticsearch`):
 
-```json
-[{"name":"orderId","type":"string","required":true,"term":"Order Id"},
- {"name":"total","type":"number","required":true,"term":"Order Total"},
- {"name":"currency","type":"string","required":true,"term":"Currency Code"},
- {"name":"customerEmail","type":"string","required":false,"sensitive":true,"term":"Customer Email"}]
-```
+1. **Resolve the flat file** (`core.identity = flatFileId`) → its `core.location`, name, external id.
+2. **Enumerate its columns** — `FlatField` assets whose `core.location::path_hierarchy.parent` is the file location → field **names + datatypes** (`core.dataType`).
+3. **Enumerate column → Business Term links** — `elementType=RELATIONSHIP`, `type=IClassTechnicalGlossaryBase`, `core.sourceIdentity ∈ columns`.
+4. **Resolve the linked terms** → `core.name`, `core.description` (vocabulary), `isCDE` (**required**).
+5. **Build the contract**, one field per column: `name`, `type`, `required` (term `isCDE`), `sensitive` (term description contains `sensitiveMarker`, e.g. *"Confidential…"*), and the governing term.
 
-- Each field references a **governed Business Term** (`term`) — the terms exist as
-  first-class CDGC glossary assets (the governed vocabulary, with `FormatType` and
-  `isCDE`); this block is their per-field projection onto the DataSet.
-- Stored on the asset's governed **description** behind the `contractMarker`
-  (`contract-fields=`). *(CDGC does not allow linking terms to a DataSet, nor
-  enumerating scanned columns via API, and custom attributes need pre-definition —
-  the description block is the reliable, API-readable carrier. A defined custom
-  attribute is the productionization.)*
+The result is cached in PDK DataStorage (lazy refresh, single-flight, `distributed`
+for cross-replica). Credentials are `security:sensitive`; CDGC response bodies are
+never logged.
 
-The policy fetches it via the CDGC `Login → JWT → data360` chain (`format:service`
-egress + injected `HttpClient`, exactly like the metadata policy) and **caches**
-it (lazy refresh, single-flight, `distributed` for cross-replica).
+This is exactly the CDGC governance graph: **catalog source → scanned table →
+columns → Business Terms** — no contract duplicated into config.
 
 ---
 
 ## How it decides — per drift type
 
-For each record at `recordsPath` in the response payload:
+For each record at `recordsPath`:
 
 | Drift | Meaning | Default action |
 |---|---|---|
-| **unexpected** | response field not in the contract (e.g. `internalMargin`) | `strip` |
-| **missingRequired** | a `required` contract field absent | `reject` |
-| **typeMismatch** | field's JSON type ≠ contract `type` (e.g. `total:"NINETY"`) | `inform` |
-| **sensitive** | a `sensitive` contract field present (e.g. `customerEmail`) | `strip` |
+| **unexpected** | response field not among the governed columns (e.g. `internal_margin`) | `strip` |
+| **missingRequired** | a `required` (isCDE) governed field absent (e.g. `sku`) | `reject` |
+| **typeMismatch** | field JSON type ≠ governed `core.dataType` | `inform` |
+| **sensitive** | a governed field whose term is marked confidential appears (e.g. `unit_cost`) | `strip` |
 
-Actions (`off | log | inform | strip | reject`), applied with precedence
-**reject > strip > inform > log**:
-- **reject** — replace the whole result with a JSON-RPC contract-violation error (`-32052`); contract-breaking data never reaches the agent.
-- **strip** — remove the offending fields from every record.
-- **inform** — annotate the outcome (no removal).
-- **log** — emit a structured drift record to the gateway logs.
-- **off** — ignore that drift type.
-
-The outcome rides in a **`_contract` annotation in the response payload** (the
-guard rewrites the body, so a transport header derived from body content isn't
-possible on the split response flow). It **self-describes and enforces from a
-single CDGC fetch** — the same asset-detail call yields the identity (name,
-externalId) and the field contract:
+Precedence **reject > strip > inform > log**. The outcome rides in a `_contract`
+annotation in the payload (the guard rewrites the body, self-describing + enforcing
+from one CDGC fetch):
 
 ```json
-"_contract": {
-  "status": "repaired|drift|ok",
-  "name": "Sales Orders", "externalId": "DS-14", "assetId": "...",
-  "drift": "!customerEmail,+internalMargin", "source": "cdgc"
-}
+"_contract": { "status":"repaired|drift|ok", "name":"dim_product.csv",
+  "assetId":"…", "externalId":"…", "drift":"!unit_cost,+internal_margin", "source":"cdgc" }
 ```
-
-> **Trusted data foundation, one policy.** This folds the *identity* half of the
-> Contract Metadata Injection story into the guard: because the guard already
-> buffers the body and fetches the governed asset, it emits the contract identity
-> **and** enforces the field contract in one robust pass — no second policy, no
-> second CDGC call. (Composing a separate header-stamping metadata policy on the
-> same instance is unreliable: its response-leg fetch races the streamed
-> response-head commit. See `demo/combined/README.md`.)
-
-Drift markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sensitive.
+Markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sensitive.
+**reject** replaces the result with a JSON-RPC `-32052` contract-violation error.
 
 ---
 
-## Live demo (verified against a real IDMC tenant)
-
-A Sales Orders upstream that has **drifted** from its governed contract:
+## Live demo (verified against the real governed `dim_product.csv`)
 
 ```
-── variant=leak  (ungoverned internalMargin + sensitive customerEmail; all required present) ──
-  DIRECT mock : {orders:[{orderId,total,currency,internalMargin,customerEmail}, …]}
-  GATEWAY     : {orders:[{orderId,total,currency}, …],
-                 _contract:{status:"repaired", drift:"!customerEmail,+internalMargin"}}   ← leak stripped
+── get_products(variant=leak) ──
+  governed asset : dim_product.csv  (assetId cb2345f7-…)
+  outcome        : status=repaired  drift=!unit_cost,+internal_margin
+  data           : [{brand, category, department, is_sellable, launch_date,
+                     lifecycle_state, list_price, product_name, sku, subcategory}]   ← unit_cost + internal_margin stripped
 
-── variant=broken (missing required currency; total is a string) ──
-  GATEWAY     : JSON-RPC error -32052 "response violated the governed contract … (~total,-currency)"  ← rejected
+── get_products(variant=broken) ──
+  REJECTED       : -32052  (!unit_cost,-sku)      ← sku (required) missing
 ```
 
-Same upstream, same request: **a silent data leak / broken payload without the
-gateway, and a repaired-or-rejected, contract-conformant response through it.**
-
-```bash
-cp demo/config.json.example demo/config.json   # fill IDMC creds/url/assetId
-# provision per demo/PROVISION.md, then:
-cp demo/env.local.sh.example demo/env.local.sh # set CMP_GW_URL
-./demo/demo.sh
-```
+Config for that run was **only** the catalog-source id + `dim_product.csv`'s id;
+the field set, `sku`'s required flag, and `unit_cost`'s sensitivity all came from
+CDGC. Run: `cp demo/config.json.example demo/config.json` (fill ids/creds) →
+provision per `demo/PROVISION.md` → `./demo/demo.sh`.
 
 ---
 
@@ -117,20 +86,19 @@ cp demo/env.local.sh.example demo/env.local.sh # set CMP_GW_URL
 
 | Property | Type | Default | Description |
 |---|---|---|---|
-| `cdgcLoginUrl` / `cdgcBaseApiUrl` | string (service) | required | IDMC login + CDGC API hosts (`format:service` egress). |
+| `cdgcLoginUrl` | string (service) | required | IDMC login base URL. |
+| `cdgcSearchUrl` | string (service) | required | CDGC search host (serves `ccgf-searchv2`), e.g. `https://cdgc-api.<pod>.informaticacloud.com`. |
 | `cdgcOrgUsername` / `cdgcOrgPassword` | string (sensitive) | required | IDMC read-only service account. |
-| `cdgcAssetId` | string | required | CDGC asset whose contract is enforced. |
-| `assetIdHeader` | string | `x-dp-contract-id` | Per-request asset-id override. |
-| `contractMarker` | string | `contract-fields=` | Marker preceding the contract JSON in the asset description. |
-| `recordsPath` | string | `""` | `/`-path to the record(s) whose fields are checked (`orders`); empty = payload root; array = each element. |
-| `onUnexpectedField` | enum | `strip` | Action for ungoverned fields. |
-| `onMissingRequired` | enum | `reject` | Action for missing required fields. |
-| `onTypeMismatch` | enum | `inform` | Action for type mismatches. |
-| `onSensitiveField` | enum | `strip` | Action for sensitive-field leaks. |
+| `catalogId` | string | required | CDGC catalog-source id (scopes/validates the asset). |
+| `flatFileId` | string | required | Scanned flat-file/table asset id whose columns define the contract. |
+| `flatFileIdHeader` | string | `x-dp-flatfile-id` | Per-request flat-file id override. |
+| `recordsPath` | string | `""` | `/`-path to the record(s) checked (`products`); array = each element. |
+| `sensitiveMarker` | string | `confidential` | Case-insensitive substring in a field's term description that marks it sensitive. |
+| `onUnexpectedField` / `onMissingRequired` / `onTypeMismatch` / `onSensitiveField` | enum | `strip`/`reject`/`inform`/`strip` | Per-drift-type action (`off\|log\|inform\|strip\|reject`). |
 | `refreshIntervalSeconds` | integer | `86400` | Contract cache TTL. |
-| `failOpenOnCdgcError` | boolean | `true` | Serve last-known-good contract on transient CDGC error; with no contract at all, pass through (never block on its own outage). |
+| `failOpenOnCdgcError` | boolean | `true` | Serve last-known-good contract on transient CDGC error; no contract → pass through. |
 | `distributed` | boolean | `false` | Share cache + refresh lock across replicas. |
-| `timeout` | integer (ms) | `5000` | Per-CDGC-call timeout (≤ ~10s chain budget). |
+| `timeout` | integer (ms) | `5000` | Per-CDGC-call timeout (≤ ~15s chained budget across the 6 calls). |
 
 ---
 
@@ -139,11 +107,10 @@ cp demo/env.local.sh.example demo/env.local.sh # set CMP_GW_URL
 ```
 contract-conformance-guard-definition/   # gcl.yaml, exchange.json, Makefile
 contract-conformance-guard-flex/          # Rust implementation
-  src/lib.rs          # CDGC fetch + cache-aside + response body inspect/strip/reject
-  src/conformance.rs  # PURE: contract parse, drift analysis, per-type decision, strip — 10 unit tests
-  src/cdgc.rs         # PURE: request-target encoding, nonce, cached types
-  src/generated/      # config.rs (Service types + service_create)
-demo/  # drifted-upstream mock, config, agent (before/after), PROVISION
+  src/lib.rs          # CDGC auth + ccgf-searchv2 contract derivation + cache-aside + body strip/reject
+  src/conformance.rs  # PURE: drift analysis + per-type decision + strip — 10 unit tests
+  src/cdgc.rs         # PURE: nonce + cached types
+demo/  # dim_product-shaped mock, config (2 ids), agent (leak/broken), combined/, PROVISION
 ```
 
 ---
@@ -157,25 +124,22 @@ make build-asset-files && cargo build --target wasm32-wasip1 --release
 cargo test --lib            # 10 pure unit tests
 make release
 ```
-
-Published at **1.0.1**. Requires **PDK 1.10** (`HttpClient`, `format:service`,
-`Clock`, DataStorage CAS).
+Published at **1.0.4** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
+the catalog-driven model). Requires **PDK 1.10**.
 
 ---
 
 ## Caveats & scope
 
-- **Body-inspecting** → heavier than a header policy, and applies to **JSON /
-  single-message SSE `tools/call` results**. Whole-stream (token-by-token) SSE
-  rewrites are out of scope (event-local rewrite is future work).
-- **Reject is fail-closed** — a deliberate config choice per drift type. The guard
-  itself is fail-open on its **own** outage (no contract resolvable → pass through).
-- Contract fidelity depends on the governed field list you publish. Governed
-  scanned columns (types + classification from MCC) are a richer future source;
-  today the description-block contract (referencing governed terms) is the
-  API-reliable carrier.
-- Composes **after** an auth policy and (ideally) alongside **Contract Metadata
-  Injection** (which shares the CDGC client).
+- **Requires an MCC scan** so the flat file has governed columns (and, for
+  required/sensitive/vocabulary, columns linked to Business Terms). Unlinked
+  columns still contribute their name + datatype to the contract.
+- **Body-inspecting** → JSON / single-message-SSE `tools/call` results; whole-stream
+  SSE rewrites are out of scope (event-local rewrite is future work).
+- **Reject is fail-closed** (per drift type); the guard is fail-open on its own
+  CDGC outage.
+- Calls the `ccgf-searchv2` API on `cdgc-api` (a `format:service` egress) — the
+  gateway must reach `*.informaticacloud.com`.
 
 ---
 
@@ -183,8 +147,8 @@ Published at **1.0.1**. Requires **PDK 1.10** (`HttpClient`, `format:service`,
 
 - **PDK** (`omni-gateway-pdk-skills`): `pdk-create-policy`, `pdk-mcp`,
   `pdk-request-headers-bodies`, `pdk-data-storage`, `pdk-distributed-cache-gossip`,
-  `pdk-sse-parsing`, `pdk-schema-definition`, `pdk-unit-tests`.
+  `pdk-schema-definition`, `pdk-unit-tests`.
 - **P4A** (`p4a-skills`): `p4a-build-policy`, `p4a-verify-requirements`,
   `p4a-mcp-usage`, `p4a-test-mcp-policies-with-a2d`.
 - **IDMC** (`governed-data-product-skills`, `IDMC - Data Governance Skills`):
-  `cdgc-publishing` / `infa-cdgc-publish` (content API, term + asset model).
+  CDGC content + `ccgf-searchv2` search graph, MCC-scanned columns, Business Terms.
