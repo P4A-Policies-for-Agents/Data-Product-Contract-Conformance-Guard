@@ -7,8 +7,8 @@ checks each response against it, acting **per drift type** — `off | log | info
 ungoverned fields, missing required fields, type mismatches, and **sensitive-field
 leaks**.
 
-You configure it with **just two ids** — a **CDGC catalog-source id** and a
-**scanned flat-file (table) id**. Everything else (the field set, datatypes,
+You configure it with **just one id** — a **CDGC asset id** for the scanned
+schema (a flat file, table, etc.). Everything else (the field set, datatypes,
 required flags, sensitivity, business-term vocabulary) is **derived from CDGC at
 runtime** and cached. No per-field configuration.
 
@@ -23,7 +23,7 @@ On a cache miss the policy authenticates to IDMC (**Login → JWT**) and then, v
 the CDGC search API **`POST cdgc-api…/ccgf-searchv2/api/v1/search`** (Elasticsearch
 DSL, `X-INFA-SEARCH-LANGUAGE: elasticsearch`):
 
-1. **Resolve the flat file** (`core.identity = flatFileId`) → its `core.location`, name, external id.
+1. **Resolve the schema asset** (`core.identity = schemaId`) → its `core.location`, name, external id.
 2. **Enumerate its columns** — `FlatField` assets whose `core.location::path_hierarchy.parent` is the file location → field **names + datatypes** (`core.dataType`).
 3. **Enumerate column → Business Term links** — `elementType=RELATIONSHIP`, `type=IClassTechnicalGlossaryBase`, `core.sourceIdentity ∈ columns`.
 4. **Resolve the linked terms** → `core.name`, `core.description` (vocabulary), `isCDE` (**required**).
@@ -75,9 +75,9 @@ Markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sens
   REJECTED       : -32052  (!unit_cost,-sku)      ← sku (required) missing
 ```
 
-Config for that run was **only** the catalog-source id + `dim_product.csv`'s id;
-the field set, `sku`'s required flag, and `unit_cost`'s sensitivity all came from
-CDGC. Run: `cp demo/config.json.example demo/config.json` (fill ids/creds) →
+Config for that run was **only** `dim_product.csv`'s schema-asset id; the field
+set, `sku`'s required flag, and `unit_cost`'s sensitivity all came from CDGC.
+Run: `cp demo/config.json.example demo/config.json` (fill id/creds) →
 provision per `demo/PROVISION.md` → `./demo/demo.sh`.
 
 ---
@@ -89,9 +89,8 @@ provision per `demo/PROVISION.md` → `./demo/demo.sh`.
 | `cdgcLoginUrl` | string (service) | required | IDMC login base URL. |
 | `cdgcSearchUrl` | string (service) | required | CDGC search host (serves `ccgf-searchv2`), e.g. `https://cdgc-api.<pod>.informaticacloud.com`. |
 | `cdgcOrgUsername` / `cdgcOrgPassword` | string (sensitive) | required | IDMC read-only service account. |
-| `catalogId` | string | required | CDGC catalog-source id (scopes/validates the asset). |
-| `flatFileId` | string | required | Scanned flat-file/table asset id whose columns define the contract. |
-| `flatFileIdHeader` | string | `x-dp-flatfile-id` | Per-request flat-file id override. |
+| `schemaId` | string | required | CDGC asset id of the scanned schema (flat file, table, etc.) whose columns define the contract. |
+| `schemaIdHeader` | string | `x-dp-schema-id` | Per-request schema-asset id override. |
 | `recordsPath` | string | `""` | `/`-path to the record(s) checked (`products`); array = each element. |
 | `sensitiveMarker` | string | `confidential` | Case-insensitive substring in a field's term description that marks it sensitive. |
 | `onUnexpectedField` / `onMissingRequired` / `onTypeMismatch` / `onSensitiveField` | enum | `strip`/`reject`/`inform`/`strip` | Per-drift-type action (`off\|log\|inform\|strip\|reject`). |
@@ -124,14 +123,15 @@ make build-asset-files && cargo build --target wasm32-wasip1 --release
 cargo test --lib            # 10 pure unit tests
 make release
 ```
-Published at **1.0.4** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
-the catalog-driven model). Requires **PDK 1.10**.
+Published at **1.0.5** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
+the catalog-driven model; 1.0.5 drops `catalogId` and renames `flatFileId`→`schemaId`).
+Requires **PDK 1.10**.
 
 ---
 
 ## Caveats & scope
 
-- **Requires an MCC scan** so the flat file has governed columns (and, for
+- **Requires an MCC scan** so the schema asset has governed columns (and, for
   required/sensitive/vocabulary, columns linked to Business Terms). Unlinked
   columns still contribute their name + datatype to the contract.
 - **Body-inspecting** → JSON / single-message-SSE `tools/call` results; whole-stream

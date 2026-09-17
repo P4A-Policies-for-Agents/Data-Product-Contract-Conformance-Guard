@@ -7,8 +7,8 @@ metadata:
     category: Quality of Service
     description: >-
       Derives a data product's field contract from Informatica CDGC (a scanned
-      flat file's columns + linked Business Terms) and checks each response
-      against it — log, inform, strip, or reject per drift type.
+      asset's columns — schema, flat file, table, etc. — + linked Business Terms)
+      and checks each response against it — log, inform, strip, or reject per drift type.
     metadata/capabilities/injectionPoint: inbound
     metadata/capabilities/assetTypes: mcp,a2a,a2a_v1
     metadata/interfaceScope: api,resource
@@ -35,21 +35,16 @@ spec:
       type: string
       description: IDMC service-account password.
       "@context": { "@characteristics": [security:sensitive] }
-    catalogId:
+    schemaId:
       type: string
       description: >-
-        CDGC catalog-source (data source) id the flat file belongs to. Used to
-        scope/validate the asset (a column's core.origin must match).
-    flatFileId:
+        CDGC asset id of the scanned schema — a flat file, table, etc. — whose
+        governed columns define the contract. The policy enumerates its columns
+        and their linked Business Terms from CDGC — no per-field configuration.
+    schemaIdHeader:
       type: string
-      description: >-
-        Internal id of the scanned flat-file / table asset whose governed columns
-        define the contract. The policy enumerates its columns and their linked
-        Business Terms from CDGC — no per-field configuration needed.
-    flatFileIdHeader:
-      type: string
-      default: x-dp-flatfile-id
-      description: Optional request header overriding flatFileId per request (multi-product).
+      default: x-dp-schema-id
+      description: Optional request header overriding schemaId per request (multi-product).
     recordsPath:
       type: string
       default: ""
@@ -106,5 +101,4 @@ spec:
     - cdgcSearchUrl
     - cdgcOrgUsername
     - cdgcOrgPassword
-    - catalogId
-    - flatFileId
+    - schemaId

@@ -1,8 +1,6 @@
 use serde::Deserialize;
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {
-    #[serde(alias = "catalogId")]
-    pub catalog_id: String,
     #[serde(
         alias = "cdgcLoginUrl",
         deserialize_with = "pdk::serde::deserialize_service"
@@ -21,10 +19,6 @@ pub struct Config {
     pub distributed: Option<bool>,
     #[serde(alias = "failOpenOnCdgcError")]
     pub fail_open_on_cdgc_error: Option<bool>,
-    #[serde(alias = "flatFileId")]
-    pub flat_file_id: String,
-    #[serde(alias = "flatFileIdHeader")]
-    pub flat_file_id_header: Option<String>,
     #[serde(alias = "onMissingRequired")]
     pub on_missing_required: Option<String>,
     #[serde(alias = "onSensitiveField")]
@@ -37,6 +31,10 @@ pub struct Config {
     pub records_path: Option<String>,
     #[serde(alias = "refreshIntervalSeconds")]
     pub refresh_interval_seconds: Option<i64>,
+    #[serde(alias = "schemaId")]
+    pub schema_id: String,
+    #[serde(alias = "schemaIdHeader")]
+    pub schema_id_header: Option<String>,
     #[serde(alias = "sensitiveMarker")]
     pub sensitive_marker: Option<String>,
     #[serde(alias = "timeout")]

@@ -169,46 +169,38 @@ fn s(map: &Value, key: &str) -> Option<String> {
     map.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-/// Catalog-driven contract: Login → JWT, then via ccgf-searchv2 resolve the flat
-/// file, enumerate its columns, their linked Business Terms, and build the contract
+/// Catalog-driven contract: Login → JWT, then via ccgf-searchv2 resolve the schema
+/// asset, enumerate its columns, their linked Business Terms, and build the contract
 /// (name + datatype + required[isCDE] + sensitive[term desc marker] + term).
 async fn fetch_contract(
     client: &HttpClient,
     config: &Config,
     clock: &Clock,
-    flat_file_id: &str,
+    schema_id: &str,
 ) -> Result<(Vec<ContractField>, Option<String>, Option<String>)> {
     let start = clock.now();
     let (jwt, org) = cdgc_auth(client, config, clock, start).await?;
     let sens_marker = config.sensitive_marker.as_deref().unwrap_or(DEFAULT_SENSITIVE_MARKER).to_lowercase();
 
-    // 1. Resolve the flat file → location + identity.
+    // 1. Resolve the schema asset → location + identity.
     let files = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
         "from":0,"size":1,"query":{"bool":{"must":[
             {"terms":{"elementType":["OBJECT"]}},
-            {"terms":{"core.identity":[flat_file_id]}}]}}
+            {"terms":{"core.identity":[schema_id]}}]}}
     })).await?;
-    let file = files.into_iter().next().ok_or_else(|| anyhow!("flat file '{flat_file_id}' not found"))?;
-    let location = s(&file, "core.location").ok_or_else(|| anyhow!("flat file has no core.location"))?;
+    let file = files.into_iter().next().ok_or_else(|| anyhow!("schema asset '{schema_id}' not found"))?;
+    let location = s(&file, "core.location").ok_or_else(|| anyhow!("schema asset has no core.location"))?;
     let file_name = s(&file, "core.name");
     let external_id = s(&file, "core.externalId");
-    // Scope check: the column origin must match the configured catalog source.
-    if !config.catalog_id.trim().is_empty() {
-        if let Some(origin) = s(&file, "core.origin") {
-            if origin != config.catalog_id {
-                logger::warn!("ccg: flat file origin {origin} != catalogId {}", config.catalog_id);
-            }
-        }
-    }
 
-    // 2. Enumerate columns (children of the file location).
+    // 2. Enumerate columns (children of the schema location).
     let cols = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
         "from":0,"size":1000,"query":{"bool":{
             "must":[{"terms":{"core.classType":[CT_FLATFIELD]}}],
             "filter":[{"terms":{"core.location::path_hierarchy.parent":[location]}}]}}
     })).await?;
     if cols.is_empty() {
-        return Err(anyhow!("no columns found for flat file '{flat_file_id}'"));
+        return Err(anyhow!("no columns found for schema asset '{schema_id}'"));
     }
     let col_ids: Vec<String> = cols.iter().filter_map(|c| s(c, "core.identity")).collect();
 
@@ -404,9 +396,9 @@ fn records_snapshot(payload: &Value, path: &str) -> Vec<Map<String, Value>> {
 
 async fn request_filter(request_state: RequestState, config: Rc<Config>) -> Flow<Option<Ctx>> {
     let hs = request_state.into_headers_state().await;
-    let header_name = config.flat_file_id_header.as_deref().unwrap_or("x-dp-flatfile-id");
+    let header_name = config.schema_id_header.as_deref().unwrap_or("x-dp-schema-id");
     let asset_id = hs.handler().header(header_name).filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| config.flat_file_id.clone());
+        .unwrap_or_else(|| config.schema_id.clone());
     let ct = hs.handler().header("content-type").unwrap_or_default();
     if ct.starts_with("application/json") && hs.method().as_str() == "POST" {
         let bs = hs.into_body_state().await;

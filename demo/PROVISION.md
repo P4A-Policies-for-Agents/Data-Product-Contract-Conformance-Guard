@@ -2,8 +2,8 @@
 
 Stands up the live catalog-driven Contract Conformance Guard demo with
 `anypoint-cli-v4` + the A2D MCP tools. The contract is derived from CDGC, so you
-need a real IDMC tenant with a **scanned flat file** (MCC scan) whose columns are
-(ideally) linked to Business Terms.
+need a real IDMC tenant with a **scanned schema asset** (a flat file, table, etc.
+from an MCC scan) whose columns are (ideally) linked to Business Terms.
 
 | Placeholder | What it is |
 |---|---|
@@ -12,22 +12,21 @@ need a real IDMC tenant with a **scanned flat file** (MCC scan) whose columns ar
 | `<gatewayId>` | Managed Flex Gateway with a public ingress |
 | `<gatewayPublicHost>` | Gateway public ingress URL |
 | `<apiInstanceId>` | API Manager instance id |
-| `<catalogSourceId>` | CDGC catalog-source id (the flat file's `core.origin`) |
-| `<flatFileId>` | Scanned flat-file asset `core.identity` |
+| `<schemaId>` | Scanned schema asset (flat file, table, etc.) `core.identity` |
 
 Governed endpoint: `https://<gatewayPublicHost>/catalog-conformance-demo/mcp`
 
-## 0. Find the catalog-source + flat-file ids (CDGC search API)
+## 0. Find the schema-asset id (CDGC search API)
 
 ```bash
-# list scanned flat files (name + id + location + origin[=catalog source id])
+# list scanned flat files (name + id + location)
 curl -s -X POST "https://cdgc-api.<pod>.informaticacloud.com/ccgf-searchv2/api/v1/search" \
   -H "Authorization: Bearer <jwt>" -H "X-INFA-ORG-ID: <orgId>" \
   -H "X-INFA-SEARCH-LANGUAGE: elasticsearch" -H "Content-Type: application/json" \
   -d '{"from":0,"size":25,"query":{"bool":{"must":[{"terms":{"core.classType":["com.infa.odin.models.file.flat.FlatFile"]}}]}}}'
 ```
-`core.identity` → `flatFileId`; `core.origin` → `catalogId`. (Get `<jwt>` via
-`/identity-service/api/v1/Login` then `/jwt/Token` — the same chain the policy uses.)
+`core.identity` → `schemaId`. (Get `<jwt>` via `/identity-service/api/v1/Login`
+then `/jwt/Token` — the same chain the policy uses.)
 
 ## 1. A2D mock (records mirroring the governed columns)
 
@@ -51,12 +50,12 @@ anypoint-cli-v4 api-mgr:api:deploy <apiInstanceId> --environment Sandbox \
   --target <gatewayId> --gatewayVersion 1.0.0 --overwrite
 ```
 
-## 3. Apply the guard (config = two ids + creds)
+## 3. Apply the guard (config = one id + creds)
 
 ```bash
-cp config.json.example config.json   # fill cdgc creds/urls + catalogId + flatFileId
+cp config.json.example config.json   # fill cdgc creds/urls + schemaId
 anypoint-cli-v4 api-mgr:policy:apply <apiInstanceId> contract-conformance-guard \
-  --environment Sandbox --groupId <orgId> --policyVersion 1.0.4 --configFile ./config.json
+  --environment Sandbox --groupId <orgId> --policyVersion 1.0.5 --configFile ./config.json
 anypoint-cli-v4 api-mgr:api:redeploy <apiInstanceId> --environment Sandbox
 ```
 

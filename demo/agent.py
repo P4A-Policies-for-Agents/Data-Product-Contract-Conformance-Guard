@@ -2,7 +2,7 @@
 """
 Agent simulation for the catalog-driven Contract Conformance Guard demo.
 
-The guard is configured with only a CDGC catalog-source id + flat-file id. At
+The guard is configured with only a CDGC schema-asset id. At
 runtime it derives the field contract live from Informatica CDGC (the scanned
 dim_product.csv columns + their linked Business Terms) and checks each response:
 
@@ -64,7 +64,7 @@ def main():
     print("Contract derived live from CDGC (dim_product.csv columns + linked Business Terms):\n")
     show("leak")
     show("broken")
-    print("The guard was given only a catalog id + flat-file id; the field set,")
+    print("The guard was given only a schema-asset id; the field set,")
     print("required flags (isCDE) and sensitivity (term marked Confidential) all came")
     print("from Informatica CDGC. internal_margin (ungoverned) + unit_cost (sensitive)")
     print("stripped; a record missing required sku is rejected.")
