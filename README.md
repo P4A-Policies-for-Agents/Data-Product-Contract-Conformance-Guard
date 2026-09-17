@@ -60,6 +60,16 @@ from one CDGC fetch):
 Markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sensitive.
 **reject** replaces the result with a JSON-RPC `-32052` contract-violation error.
 
+Two behaviors worth calling out:
+- **A `reject` short-circuits everything** — no body is returned, so strips that
+  would otherwise apply (e.g. a sensitive field) never happen; the whole response fails closed.
+- **A field that is both required and sensitive is stripped when present** — the
+  missing-required rule only fires on *absence*, so on the outbound edge the leak
+  guard wins and a required-but-confidential value is removed before it reaches the agent.
+
+See [`demo/WALKTHROUGH.md`](demo/WALKTHROUGH.md) for a field-by-field trace of both
+demo variants (raw upstream → contract → guarded output).
+
 ---
 
 ## Live demo (verified against the real governed `dim_product.csv`)
@@ -78,7 +88,9 @@ Markers: `+` unexpected · `-` missing-required · `~` type-mismatch · `!` sens
 Config for that run was **only** `dim_product.csv`'s schema-asset id; the field
 set, `sku`'s required flag, and `unit_cost`'s sensitivity all came from CDGC.
 Run: `cp demo/config.json.example demo/config.json` (fill id/creds) →
-provision per `demo/PROVISION.md` → `./demo/demo.sh`.
+provision per [`demo/PROVISION.md`](demo/PROVISION.md) → `./demo/demo.sh`.
+[`demo/WALKTHROUGH.md`](demo/WALKTHROUGH.md) traces both variants field by field —
+why `leak` is repaired and `broken` is rejected.
 
 ---
 
@@ -109,7 +121,7 @@ contract-conformance-guard-flex/          # Rust implementation
   src/lib.rs          # CDGC auth + ccgf-searchv2 contract derivation + cache-aside + body strip/reject
   src/conformance.rs  # PURE: drift analysis + per-type decision + strip — 10 unit tests
   src/cdgc.rs         # PURE: nonce + cached types
-demo/  # dim_product-shaped mock, config (2 ids), agent (leak/broken), combined/, PROVISION
+demo/  # dim_product-shaped mock, config (schemaId), agent (leak/broken), combined/, PROVISION, WALKTHROUGH
 ```
 
 ---
