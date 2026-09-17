@@ -107,6 +107,7 @@ why `leak` is repaired and `broken` is rejected.
 | `cdgcOrgUsername` / `cdgcOrgPassword` | string (sensitive) | required | IDMC read-only service account. |
 | `schemaId` | string | required | CDGC asset id of the scanned schema (flat file, table, etc.) whose columns define the contract. |
 | `schemaIdHeader` | string | `x-dp-schema-id` | Per-request schema-asset id override. |
+| `schemaIdClaim` | string | _unset_ | Optional JWT claim name to read `schemaId` from; when set + present it wins over `schemaIdHeader`, binding the caller to a data product via the signed token. Needs an upstream JWT Validation policy. |
 | `recordsPath` | string | `""` | `/`-path to the record(s) checked (`products`); array = each element. |
 | `sensitiveMarker` | string | `confidential` | Case-insensitive substring in a field's term description that marks it sensitive. |
 | `onUnexpectedField` / `onMissingRequired` / `onTypeMismatch` / `onSensitiveField` | enum | `strip`/`reject`/`inform`/`strip` | Per-drift-type action (`off\|log\|inform\|strip\|reject`). |
@@ -139,9 +140,18 @@ make build-asset-files && cargo build --target wasm32-wasip1 --release
 cargo test --lib            # 10 pure unit tests
 make release
 ```
-Published at **1.0.5** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
-the catalog-driven model; 1.0.5 drops `catalogId` and renames `flatFileId`→`schemaId`).
-Requires **PDK 1.10**.
+Published at **1.1.0** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
+the catalog-driven model; 1.0.5 drops `catalogId` and renames `flatFileId`→`schemaId`;
+1.0.6 derives sensitivity from the Business Term Security Level; 1.0.7 adds REST/HTTP;
+**1.1.0 adds opt-in `schemaIdClaim`** — read the schema id from a validated JWT claim,
+header mode stays the default). Requires **PDK 1.10**.
+
+> **Sourcing the schema id from a JWT:** set `schemaIdClaim` to read `schemaId`
+> from the caller's Bearer token instead of the `x-dp-schema-id` header — the
+> configured claim wins when present, otherwise the header/config is used. The
+> token is only decoded; a **JWT Validation policy must run upstream** to verify
+> it. This binds the caller to a data product so a spoofed header can't redirect
+> the guard.
 
 ---
 
