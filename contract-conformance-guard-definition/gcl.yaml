@@ -60,11 +60,14 @@ spec:
         "/"-separated path into the tool-result payload to the record(s) whose
         fields are checked, e.g. "products". Empty = payload root; array = each element.
     sensitiveLevels:
-      type: string
-      default: confidential,restricted
+      type: array
+      items:
+        type: string
+        enum: [public, internal, confidential, restricted]
+      default: [confidential, restricted]
       description: >-
-        Comma-separated IDMC Business Term "Security Level" (securityClassification)
-        values that mark a field sensitive — e.g. confidential,restricted. Matched
+        IDMC Business Term "Security Level" (securityClassification) values that
+        mark a field sensitive — e.g. confidential, restricted. Matched
         case-insensitively against each column's linked term's structured
         classification. This is the primary sensitivity signal.
     sensitiveMarker:

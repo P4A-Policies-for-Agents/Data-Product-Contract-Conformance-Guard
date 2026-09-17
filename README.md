@@ -140,11 +140,13 @@ make build-asset-files && cargo build --target wasm32-wasip1 --release
 cargo test --lib            # 10 pure unit tests
 make release
 ```
-Published at **1.1.0** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
+Published at **1.2.0** (1.0.0–1.0.2 used a description-block contract; 1.0.3+ is
 the catalog-driven model; 1.0.5 drops `catalogId` and renames `flatFileId`→`schemaId`;
 1.0.6 derives sensitivity from the Business Term Security Level; 1.0.7 adds REST/HTTP;
-**1.1.0 adds opt-in `schemaIdClaim`** — read the schema id from a validated JWT claim,
-header mode stays the default). Requires **PDK 1.10**.
+1.1.0 adds opt-in `schemaIdClaim` — read the schema id from a validated JWT claim,
+header mode stays the default; **1.2.0 turns `sensitiveLevels` into a multi-select
+dropdown** — `type: array` of `[public, internal, confidential, restricted]` in API
+Manager, instead of a comma-separated string). Requires **PDK 1.10**.
 
 > **Sourcing the schema id from a JWT:** set `schemaIdClaim` to read `schemaId`
 > from the caller's Bearer token instead of the `x-dp-schema-id` header — the
