@@ -54,6 +54,10 @@ const SEARCH_PATH: &str = "/ccgf-searchv2/api/v1/search";
 const CT_FLATFIELD: &str = "com.infa.odin.models.file.flat.FlatField";
 const REL_TECH_GLOSSARY: &str = "com.infa.ccgf.models.governance.IClassTechnicalGlossaryBase";
 const ATTR_ISCDE: &str = "com.infa.ccgf.models.governance.isCDE";
+// The structured IDMC "Security Level" classification on a Business Term
+// (Public | Internal | Confidential | Restricted) — the primary sensitivity signal.
+const ATTR_SECURITY_CLASS: &str = "com.infa.ccgf.models.governance.securityClassification";
+const DEFAULT_SENSITIVE_LEVELS: &str = "confidential,restricted";
 const DEFAULT_SENSITIVE_MARKER: &str = "confidential";
 /// JSON-RPC error code for a contract-conformance reject (server-defined range).
 const RPC_CONTRACT_VIOLATION: i64 = -32052;
@@ -171,7 +175,7 @@ fn s(map: &Value, key: &str) -> Option<String> {
 
 /// Catalog-driven contract: Login → JWT, then via ccgf-searchv2 resolve the schema
 /// asset, enumerate its columns, their linked Business Terms, and build the contract
-/// (name + datatype + required[isCDE] + sensitive[term desc marker] + term).
+/// (name + datatype + required[isCDE] + sensitive[term Security Level, desc-marker fallback] + term).
 async fn fetch_contract(
     client: &HttpClient,
     config: &Config,
@@ -181,6 +185,8 @@ async fn fetch_contract(
     let start = clock.now();
     let (jwt, org) = cdgc_auth(client, config, clock, start).await?;
     let sens_marker = config.sensitive_marker.as_deref().unwrap_or(DEFAULT_SENSITIVE_MARKER).to_lowercase();
+    let sens_levels: Vec<String> = config.sensitive_levels.as_deref().unwrap_or(DEFAULT_SENSITIVE_LEVELS)
+        .split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
 
     // 1. Resolve the schema asset → location + identity.
     let files = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
@@ -222,7 +228,7 @@ async fn fetch_contract(
         }
     }
 
-    // 4. Resolve the linked terms → name / description / isCDE.
+    // 4. Resolve the linked terms → name / Security Level / description (fallback) / isCDE.
     let mut terms: Map<String, Value> = Map::new(); // termId → {name, desc, isCDE}
     if !term_ids.is_empty() {
         let tdocs = cdgc_search(client, config, clock, start, &jwt, &org, &json!({
@@ -235,6 +241,7 @@ async fn fetch_contract(
                 terms.insert(id, json!({
                     "name": s(t, "core.name"),
                     "desc": s(t, "core.description").unwrap_or_default(),
+                    "level": s(t, ATTR_SECURITY_CLASS).unwrap_or_default(),
                     "isCDE": t.get(ATTR_ISCDE).and_then(Value::as_bool).unwrap_or(false),
                 }));
             }
@@ -253,8 +260,15 @@ async fn fetch_contract(
             if let Some(term) = terms.get(tid) {
                 term_name = term.get("name").and_then(Value::as_str).map(str::to_string);
                 required = term.get("isCDE").and_then(Value::as_bool).unwrap_or(false);
-                let desc = term.get("desc").and_then(Value::as_str).unwrap_or("");
-                sensitive = desc.to_lowercase().contains(&sens_marker);
+                // Primary: the term's structured Security Level classification.
+                // Fallback (only when no level is set): the description substring marker.
+                let level = term.get("level").and_then(Value::as_str).unwrap_or("").trim().to_lowercase();
+                sensitive = if level.is_empty() {
+                    let desc = term.get("desc").and_then(Value::as_str).unwrap_or("");
+                    desc.to_lowercase().contains(&sens_marker)
+                } else {
+                    sens_levels.contains(&level)
+                };
             }
         }
         fields.push(ContractField { name, ftype, required, sensitive, term: term_name });
