@@ -12,8 +12,12 @@ schema (a flat file, table, etc.). Everything else (the field set, datatypes,
 required flags, sensitivity, business-term vocabulary) is **derived from CDGC at
 runtime** and cached. No per-field configuration.
 
-Built with the PDK, Rust → `wasm32-wasip1`, split-model. Works on **MCP**
-(`tools/call`), **A2A**, and **REST/HTTP** JSON responses.
+Built with the PDK, Rust → `wasm32-wasip1`, split-model. Applies to **MCP**
+(`tools/call`) and **REST/HTTP APIs** (`assetTypes: mcp,rest,http`) — both bind to
+a data-product schema, so per-field governance maps cleanly. (A2A was dropped:
+agents aren't bound to a schema, so field-level derivation doesn't apply.) The
+policy unwraps the MCP JSON-RPC envelope when present, and otherwise treats the
+REST response body as the payload directly.
 
 ---
 
@@ -76,7 +80,7 @@ demo variants (raw upstream → contract → guarded output).
 
 ```
 ── get_products(variant=leak) ──
-  governed asset : dim_product.csv  (assetId cb2345f7-…)
+  governed asset : dim_product.csv  (assetId <schemaId>)
   outcome        : status=repaired  drift=!unit_cost,+internal_margin
   data           : [{brand, category, department, is_sellable, launch_date,
                      lifecycle_state, list_price, product_name, sku, subcategory}]   ← unit_cost + internal_margin stripped

@@ -432,6 +432,14 @@ async fn request_filter(request_state: RequestState, config: Rc<Config>) -> Flow
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Where the business payload lives in the response, so we can write it back.
+/// MCP/A2A wrap it in a JSON-RPC envelope; a REST API returns it directly.
+enum Place {
+    Structured,     // result.structuredContent (MCP)
+    Content(usize), // result.content[i].text as embedded JSON (MCP)
+    Rest,           // the response body *is* the payload (REST/HTTP API)
+}
+
 async fn response_filter<S: DataStorage>(
     response_state: ResponseState,
     request_data: RequestData<Option<Ctx>>,
@@ -472,33 +480,43 @@ async fn response_filter<S: DataStorage>(
         Some(v) => v,
         None => return,
     };
-    // Only govern successful tool results.
-    if rpc.get("result").is_none() {
-        return;
-    }
-
-    // Extract the business payload: structuredContent, else the first JSON content[].text.
-    let result = rpc.get("result").unwrap();
-    let (mut payload, from_structured, content_idx) = if let Some(sc) = result.get("structuredContent") {
-        (sc.clone(), true, None)
-    } else if let Some(arr) = result.get("content").and_then(Value::as_array) {
-        let mut found = None;
-        for (i, item) in arr.iter().enumerate() {
-            if item.get("type").and_then(Value::as_str) == Some("text") {
-                if let Some(t) = item.get("text").and_then(Value::as_str) {
-                    if let Ok(v) = serde_json::from_str::<Value>(t) {
-                        found = Some((v, i));
-                        break;
+    // MCP/A2A wrap the payload in a JSON-RPC envelope; a REST API returns the JSON
+    // payload directly. Detect which, extract the payload, and remember where to
+    // write it back.
+    let is_rpc = is_sse
+        || rpc.get("jsonrpc").is_some()
+        || (rpc.get("result").is_some() && rpc.get("id").is_some());
+    let (mut payload, place) = if is_rpc {
+        // Only govern successful tool results.
+        let result = match rpc.get("result") {
+            Some(r) => r,
+            None => return,
+        };
+        // structuredContent, else the first JSON content[].text.
+        if let Some(sc) = result.get("structuredContent") {
+            (sc.clone(), Place::Structured)
+        } else if let Some(arr) = result.get("content").and_then(Value::as_array) {
+            let mut found = None;
+            for (i, item) in arr.iter().enumerate() {
+                if item.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        if let Ok(v) = serde_json::from_str::<Value>(t) {
+                            found = Some((v, i));
+                            break;
+                        }
                     }
                 }
             }
-        }
-        match found {
-            Some((v, i)) => (v, false, Some(i)),
-            None => return,
+            match found {
+                Some((v, i)) => (v, Place::Content(i)),
+                None => return,
+            }
+        } else {
+            return;
         }
     } else {
-        return;
+        // REST / HTTP API: the whole response body is the payload.
+        (rpc.clone(), Place::Rest)
     };
 
     // Analyze all records against the contract.
@@ -516,12 +534,21 @@ async fn response_filter<S: DataStorage>(
         logger::info!("ccg-drift asset={} {}", ctx.asset_id, entry);
     }
 
-    // Reject → replace the whole result with a JSON-RPC contract-violation error.
+    // Reject → withhold the offending data and report the violation. MCP/A2A carry
+    // the error in a JSON-RPC error envelope; a REST API gets a JSON error body.
+    // (HTTP status can't be changed once the body is buffered, so REST rejects stay
+    // at the upstream status with an error payload — same constraint as MCP's 200.)
     if dec.reject {
         logger::warn!("ccg: REJECT asset={} drift={}", ctx.asset_id, dec.summary);
-        let err = json!({ "jsonrpc": "2.0", "id": ctx.rpc_id,
-            "error": { "code": RPC_CONTRACT_VIOLATION,
-                "message": format!("response violated the governed contract for asset {} ({})", ctx.asset_id, dec.summary) } });
+        let message = format!("response violated the governed contract for asset {} ({})", ctx.asset_id, dec.summary);
+        let err = if let Place::Rest = place {
+            json!({ "error": { "code": RPC_CONTRACT_VIOLATION, "message": message },
+                "_contract": { "status": "rejected", "assetId": ctx.asset_id,
+                    "name": cc.name, "externalId": cc.external_id, "drift": dec.summary, "source": "cdgc" } })
+        } else {
+            json!({ "jsonrpc": "2.0", "id": ctx.rpc_id,
+                "error": { "code": RPC_CONTRACT_VIOLATION, "message": message } })
+        };
         if let Err(e) = bs.handler().set_body(frame(&err, is_sse).as_bytes()) {
             logger::warn!("ccg: set_body (reject) failed: {e:?}");
         }
@@ -557,21 +584,28 @@ async fn response_filter<S: DataStorage>(
     }
 
     // Write the payload back where we found it, then reframe.
-    if from_structured {
-        if let Some(r) = rpc.get_mut("result") {
-            if let Some(obj) = r.as_object_mut() {
-                obj.insert("structuredContent".to_string(), payload.clone());
-                // keep the text mirror consistent if present
-                if let Some(arr) = obj.get_mut("content").and_then(Value::as_array_mut) {
-                    if let Some(first) = arr.iter_mut().find(|i| i.get("type").and_then(Value::as_str) == Some("text")) {
-                        first["text"] = Value::String(payload.to_string());
+    match place {
+        Place::Structured => {
+            if let Some(r) = rpc.get_mut("result") {
+                if let Some(obj) = r.as_object_mut() {
+                    obj.insert("structuredContent".to_string(), payload.clone());
+                    // keep the text mirror consistent if present
+                    if let Some(arr) = obj.get_mut("content").and_then(Value::as_array_mut) {
+                        if let Some(first) = arr.iter_mut().find(|i| i.get("type").and_then(Value::as_str) == Some("text")) {
+                            first["text"] = Value::String(payload.to_string());
+                        }
                     }
                 }
             }
         }
-    } else if let Some(i) = content_idx {
-        if let Some(item) = rpc.pointer_mut(&format!("/result/content/{i}/text")) {
-            *item = Value::String(payload.to_string());
+        Place::Content(i) => {
+            if let Some(item) = rpc.pointer_mut(&format!("/result/content/{i}/text")) {
+                *item = Value::String(payload.to_string());
+            }
+        }
+        Place::Rest => {
+            // REST: the response body is the payload itself (no envelope to reframe).
+            rpc = payload.clone();
         }
     }
 

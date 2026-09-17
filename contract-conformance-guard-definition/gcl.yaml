@@ -10,7 +10,7 @@ metadata:
       asset's columns — schema, flat file, table, etc. — + linked Business Terms)
       and checks each response against it — log, inform, strip, or reject per drift type.
     metadata/capabilities/injectionPoint: inbound
-    metadata/capabilities/assetTypes: mcp,a2a,a2a_v1
+    metadata/capabilities/assetTypes: mcp,rest,http
     metadata/interfaceScope: api,resource
 spec:
   extends:

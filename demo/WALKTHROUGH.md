@@ -7,7 +7,7 @@ the only policy input is the one `schemaId`.
 
 ## The contract (derived live from CDGC — not configured)
 
-On the first call the guard resolves `schemaId = cb2345f7-d54f-4d8b-ba76-9b78b14576c4`
+On the first call the guard resolves `schemaId = <schemaId>` (the CDGC asset id of `dim_product.csv`)
 in CDGC, enumerates the scanned asset's columns, follows each column → Business
 Term link, and builds this contract for `dim_product.csv` (then caches it, TTL
 `refreshIntervalSeconds = 86400`):
@@ -64,8 +64,8 @@ rewrites the body, stamping a `_contract` annotation.
 **What the client receives** (10 fields; `unit_cost` + `internal_margin` gone):
 
 ```json
-{ "_contract": { "assetId":"cb2345f7-…","name":"dim_product.csv",
-    "externalId":"b423cc70-…://FileServer/data/csv/dim_product.csv~…FlatFile",
+{ "_contract": { "assetId":"<schemaId>","name":"dim_product.csv",
+    "externalId":"<externalId>",
     "source":"cdgc","drift":"!unit_cost,+internal_margin","status":"repaired" },
   "count": 1,
   "products": [ { "brand":"Acme","category":"Kitchen","department":"Home",
@@ -104,7 +104,7 @@ By precedence, the `reject` from `-sku` wins and short-circuits everything — t
 **What the client receives** (JSON-RPC error, HTTP-level failure to the agent):
 
 ```
--32052  response violated the governed contract for asset cb2345f7-… (!unit_cost,-sku)
+-32052  response violated the governed contract for asset <schemaId> (!unit_cost,-sku)
 ```
 
 The error message still lists every drift the guard saw (`!unit_cost,-sku`), but
